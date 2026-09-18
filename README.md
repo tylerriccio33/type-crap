@@ -30,6 +30,121 @@ Output is `path:line:col: CODE message`, one per finding; exit code is 1 if
 anything was reported. Silence a function with `# noqa: NU001` (or a bare
 `# noqa`) on its `def` line. `@overload` stubs and empty bodies are skipped.
 
+## Examples
+
+`examples/smells.py` has one function per rule. `type-crap examples/` prints:
+
+```
+smells.py:4:0: NU002 `shout` rejects `x=None` at line 6; annotate `x: str` and assert at the call site
+smells.py:4:0: NU003 `shout` is annotated `-> str | None` but no *explicit* None return (unverified calls at 8); verify and use `-> str`
+smells.py:11:0: NU001 `ident` echoes None for `x` (guard at 14); no other None source; want `def ident[T](...x: T...) -> T` or overloads
+smells.py:18:0: NU001 `lower` echoes None for `name` (guard at 20); no other None source (unverified calls at 20); want `def lower[T](...name: T...) -> T` or overloads
+smells.py:23:0: NU001 `sheet` echoes None for `range_` (guard at 26); `(None) -> None` / `(str) -> str | None` overloads (other maybe-None returns at 28)
+smells.py:31:0: NU003 `succ` is annotated `-> int | None` but no return path yields None; use `-> int`
+smells.py:36:0: NU004 `first_line` dereferences `text: str | None` at line 38 with no None check anywhere; guard it or annotate `text: str`
+smells.py:41:0: NU002 `read` rejects `path=None` at line 44 but only inside `if`; hoist the check and annotate `path: str`, or handle None on the other paths
+```
+
+### Before / after
+
+**NU001, no other None source** — the `| None` on both ends is one fact
+stated twice. Say it once with a type parameter:
+
+```python
+# before
+def ident(x: str | None) -> str | None:
+    if x is None:
+        return None
+    return x
+
+
+# after
+def ident[T: str | None](x: T) -> T:
+    return x
+```
+
+**NU001 with a second None source** — the return can be None for its own
+reasons too, so a TypeVar would over-promise. Overloads tell callers that
+a `str` in *might* give None back, but `None` in always does:
+
+```python
+# before
+def sheet(range_: str | None) -> str | None:
+    if range_ is None:
+        return None
+    name, _, _ = range_.partition("$")
+    return name or None
+
+
+# after
+@overload
+def sheet(range_: None) -> None: ...
+@overload
+def sheet(range_: str) -> str | None: ...
+def sheet(range_: str | None) -> str | None:  # noqa: NU001
+    ...
+```
+
+**NU002 + NU003** — the function never handles None; it refuses it. That
+check belongs to whoever has the `str | None` in hand:
+
+```python
+# before
+def shout(x: str | None) -> str | None:
+    if x is None:
+        raise ValueError("x is required")
+    return x.upper()
+
+
+# after
+def shout(x: str) -> str:
+    return x.upper()
+
+
+# caller
+if name is None:
+    raise ValueError("name is required")
+shout(name)
+```
+
+**NU004** — either the annotation is wrong or the guard is missing. Pick
+one:
+
+```python
+# before
+def first_line(text: str | None) -> str:
+    return text.splitlines()[0]
+
+
+# after (a): the param was never really optional
+def first_line(text: str) -> str:
+    return text.splitlines()[0]
+
+
+# after (b): it is optional, so say what None means
+def first_line(text: str | None) -> str:
+    if text is None:
+        return ""
+    return text.splitlines()[0]
+```
+
+**NU002, conditional** — None is rejected on one path and silently
+accepted on the others. Usually the check wants hoisting:
+
+```python
+# before
+def read(path: str | None, strict: bool) -> int:
+    if strict:
+        if path is None:
+            raise FileNotFoundError
+    return 0
+
+
+# after
+def read(path: str, strict: bool) -> int:
+    return 0
+```
+
 ## Rules
 
 ### NU001 — None-passthrough
