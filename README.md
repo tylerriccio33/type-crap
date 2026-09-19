@@ -28,7 +28,8 @@ type-crap --select NU001,NU003 --loose src/   # a subset of rules, wider net
 
 Output is `path:line:col: CODE message`, one per finding; exit code is 1 if
 anything was reported. Silence a function with `# noqa: NU001` (or a bare
-`# noqa`) on its `def` line. `@overload` stubs and empty bodies are skipped.
+`# noqa`) on its `def` line. `@overload` stubs, the implementation that follows them, and empty bodies
+are skipped.
 
 ## Examples
 
@@ -81,7 +82,7 @@ def sheet(range_: str | None) -> str | None:
 def sheet(range_: None) -> None: ...
 @overload
 def sheet(range_: str) -> str | None: ...
-def sheet(range_: str | None) -> str | None:  # noqa: NU001
+def sheet(range_: str | None) -> str | None:
     ...
 ```
 

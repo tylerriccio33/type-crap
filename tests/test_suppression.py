@@ -47,7 +47,7 @@ def test_overloads_are_skipped(codes):
         def f(x: None) -> None: ...
         @overload
         def f(x: str) -> str: ...
-        def f(x: str | None) -> str | None:  # noqa
+        def f(x: str | None) -> str | None:
             if x is None:
                 return None
             return x

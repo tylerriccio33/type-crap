@@ -266,6 +266,29 @@ def _is_overload(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     )
 
 
+def _overload_impls(tree: ast.AST) -> set[int]:
+    """ids of defs that implement a preceding run of `@overload` stubs of the same name.
+
+    Their `X | None` signature is just the union of the stubs, so it is not a lie.
+    """
+    out: set[int] = set()
+    for node in ast.walk(tree):
+        for block in ("body", "orelse", "finalbody"):
+            stmts = getattr(node, block, None)
+            if not isinstance(stmts, list):
+                continue
+            pending: str | None = None
+            for st in stmts:
+                if isinstance(st, ast.FunctionDef | ast.AsyncFunctionDef):
+                    if _is_overload(st):
+                        pending = st.name
+                        continue
+                    if st.name == pending:
+                        out.add(id(st))
+                pending = None
+    return out
+
+
 def _is_stub(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     for st in fn.body:
         if isinstance(st, ast.Pass):
@@ -284,11 +307,12 @@ def check_source(path: Path, src: str, *, loose: bool = False) -> list[Finding]:
     tree = ast.parse(src, filename=str(path))
     lines = src.splitlines()
     out: list[Finding] = []
+    impls = _overload_impls(tree)
 
     for fn in ast.walk(tree):
         if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
-        if _is_overload(fn) or _is_stub(fn):
+        if _is_overload(fn) or _is_stub(fn) or id(fn) in impls:
             continue
         silenced = _noqa(lines, fn)
         a = fn.args
