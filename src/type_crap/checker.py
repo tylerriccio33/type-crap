@@ -18,7 +18,7 @@ from type_crap._ast import (
     _terminates,
 )
 
-CODES = {"NU001", "NU002", "NU003", "NU004"}
+CODES = {"NU001", "NU002", "NU003", "NU004", "NU005"}
 
 # Enclosing constructs that don't make a nested guard conditional.
 _STRAIGHT_LINE = {"with", "try"}
@@ -299,6 +299,83 @@ def _is_stub(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return True
 
 
+def _union_members(ann: ast.expr | None) -> list[str]:
+    """`A | B`, `Union[A, B]`, `Optional[A]`, or a string of those -> ["A", "B"].
+    Anything else is a single member."""
+    if ann is None:
+        return []
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        try:
+            ann = ast.parse(ann.value, mode="eval").body
+        except SyntaxError:
+            return [ann.value]
+    if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):
+        return _union_members(ann.left) + _union_members(ann.right)
+    if isinstance(ann, ast.Subscript):
+        v = ann.value
+        head = v.attr if isinstance(v, ast.Attribute) else getattr(v, "id", "")
+        if head == "Union":
+            elts = ann.slice.elts if isinstance(ann.slice, ast.Tuple) else [ann.slice]
+            return [m for e in elts for m in _union_members(e)]
+        if head == "Optional":
+            return [*_union_members(ann.slice), "None"]
+    return ["None" if _is_none_ann(ann) else ast.unparse(ann)]
+
+
+def _isinstance_test(test: ast.expr) -> tuple[str, list[str], bool] | None:
+    """`isinstance(p, T)` / `isinstance(p, (T1, T2))`, optionally under `not`
+    -> (p, [T...], negated)."""
+    negated = False
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        test, negated = test.operand, True
+    if not (
+        isinstance(test, ast.Call)
+        and isinstance(test.func, ast.Name)
+        and test.func.id == "isinstance"
+        and len(test.args) == 2
+        and isinstance(test.args[0], ast.Name)
+    ):
+        return None
+    t = test.args[1]
+    elts = t.elts if isinstance(t, ast.Tuple) else [t]
+    return test.args[0].id, [ast.unparse(e) for e in elts], negated
+
+
+@dataclass
+class _TypeGuard:
+    line: int  # first guard on the param
+    rejected: set[str] = field(default_factory=set)  # `if isinstance(p, T): raise`
+    kept: list[set[str]] = field(default_factory=list)  # `assert isinstance(p, T)`
+
+    def survivors(self, members: list[str]) -> list[str]:
+        return [m for m in members if m not in self.rejected and all(m in k for k in self.kept)]
+
+
+def _type_guards(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, _TypeGuard]:
+    """Leading `if isinstance(p, T): raise` / `assert isinstance(p, T)` guards.
+    Stops at the first statement that isn't a docstring or such a guard."""
+    out: dict[str, _TypeGuard] = {}
+    body = fn.body
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]
+    for st in body:
+        if isinstance(st, ast.If) and not st.orelse and _ends_in_raise(st.body):
+            hit, raises_on_match = _isinstance_test(st.test), True
+        elif isinstance(st, ast.Assert):
+            hit, raises_on_match = _isinstance_test(st.test), False
+        else:
+            break
+        if hit is None:
+            break
+        name, types, negated = hit
+        g = out.setdefault(name, _TypeGuard(st.lineno))
+        if negated == raises_on_match:  # `if not isinstance: raise` / `assert isinstance`
+            g.kept.append(set(types))
+        else:
+            g.rejected.update(types)
+    return out
+
+
 def _lines(nums: list[int]) -> str:
     return ", ".join(map(str, nums))
 
@@ -323,6 +400,21 @@ def check_source(path: Path, src: str, *, loose: bool = False) -> list[Finding]:
         none_params = {n for n, ann in ann_of.items() if _has_none(ann)}
         nonnone_params = set(ann_of) - none_params
         ret_none = _has_none(fn.returns)
+
+        # NU005 -- union param that rejects some of its members
+        for name, g in sorted(_type_guards(fn).items()):
+            members = _union_members(ann_of.get(name))
+            left = g.survivors(members)
+            gone = [m for m in members if m not in left]
+            if not gone or not left:
+                continue
+            msg = (
+                f"`{fn.name}` rejects `{name}: {' | '.join(gone)}` at line {g.line};"
+                f" annotate `{name}: {' | '.join(left)}`"
+            )
+            if "NU005" not in silenced:
+                out.append(Finding(path, fn.lineno, fn.col_offset, "NU005", msg))
+
         if not none_params and not ret_none:
             continue
 

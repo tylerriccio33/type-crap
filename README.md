@@ -209,6 +209,32 @@ assert, and no reassignment. Either the annotation is wrong or the runtime
 check is missing. A type checker will also catch this; it's here so the
 tool tells the whole story on its own.
 
+### NU005 — rejected union member
+
+A union param (`A | B`, `Union[A, B]`, `Optional[A]`) whose body opens with
+`isinstance` guards that throw some members away:
+`if isinstance(p, A): raise`, `if not isinstance(p, B): raise`, or
+`assert isinstance(p, B)`. Only the leading run of guards (after any
+docstring) counts, so dispatch like `if isinstance(p, A): return ...` and
+checks buried after other code stay quiet. Narrow the annotation to what
+survives and make callers do the check.
+
+```python
+# before
+def succ(x: str | int) -> int:
+    if isinstance(x, str):
+        raise TypeError("x")
+    return x + 1
+
+
+# after
+def succ(x: int) -> int:
+    return x + 1
+```
+
+Type names are compared as written, so subclass relationships aren't
+understood (`isinstance(p, Base)` against `Sub | Other` is missed).
+
 ## What it knows and doesn't
 
 Knows: `A | B | None`, `Optional[A]`, `Union[A, None]`, string
