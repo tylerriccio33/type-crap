@@ -16,6 +16,7 @@ from type_crap._ast import (
     _noneness,
     _strip_none,
     _terminates,
+    _union_members,
 )
 from type_crap.redundant import check_redundant
 
@@ -306,27 +307,12 @@ def _is_stub(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return True
 
 
-def _union_members(ann: ast.expr | None) -> list[str]:
-    """`A | B`, `Union[A, B]`, `Optional[A]`, or a string of those -> ["A", "B"].
-    Anything else is a single member."""
+def _member_names(ann: ast.expr | None) -> list[str]:
+    """Union members as written (`None` spelled "None"), for comparing with
+    isinstance targets."""
     if ann is None:
         return []
-    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
-        try:
-            ann = ast.parse(ann.value, mode="eval").body
-        except SyntaxError:
-            return [ann.value]
-    if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):
-        return _union_members(ann.left) + _union_members(ann.right)
-    if isinstance(ann, ast.Subscript):
-        v = ann.value
-        head = v.attr if isinstance(v, ast.Attribute) else getattr(v, "id", "")
-        if head == "Union":
-            elts = ann.slice.elts if isinstance(ann.slice, ast.Tuple) else [ann.slice]
-            return [m for e in elts for m in _union_members(e)]
-        if head == "Optional":
-            return [*_union_members(ann.slice), "None"]
-    return ["None" if _is_none_ann(ann) else ast.unparse(ann)]
+    return ["None" if _is_none_ann(m) else ast.unparse(m) for m in _union_members(ann)]
 
 
 def _isinstance_test(test: ast.expr) -> tuple[str, list[str], bool] | None:
@@ -464,7 +450,7 @@ def check_source(path: Path, src: str, *, loose: bool = False) -> list[Finding]:
 
         # NU005 -- union param that rejects some of its members
         for name, g in sorted(_type_guards(fn).items()):
-            members = _union_members(ann_of.get(name))
+            members = _member_names(ann_of.get(name))
             left = g.survivors(members)
             gone = [m for m in members if m not in left]
             if not gone or not left:
@@ -505,7 +491,7 @@ def check_source(path: Path, src: str, *, loose: bool = False) -> list[Finding]:
 
         # RD006 -- isinstance guard that repeats a non-union annotation
         for name, g in sorted(_type_guards(fn).items()):
-            members = _union_members(ann_of.get(name))
+            members = _member_names(ann_of.get(name))
             if len(members) == 1 and members[0] != "None" and any(members[0] in k for k in g.kept):
                 report_rd(
                     "RD006",
