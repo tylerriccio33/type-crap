@@ -1,7 +1,9 @@
 # type-crap
 
-A tiny AST linter for one specific smell: `X | None` parameters and returns
-that don't mean what they say.
+A tiny AST linter for type annotations that lie (`NU` rules: mostly
+`X | None` parameters and returns that don't mean what they say) and for code
+that re-implements what Python already does or ports a pattern from another
+language that has no job here (`RD` rules).
 
 ```python
 def f(x: str | None) -> str | None:  # both Nones are lies
@@ -24,11 +26,18 @@ Type checkers are happy with both. `type-crap` is not.
 uv tool install .            # or: uv run type-crap ...
 type-crap src/ tests/
 type-crap --select NU001,NU003 --loose src/   # a subset of rules, wider net
+type-crap --ignore RD006,RD010 --exclude 'vendor' --exclude '*_pb2.py' src/
 ```
 
+Every rule is on by default. `--select` and `--ignore` take codes or
+prefixes (`RD` is the whole family, `RD00` is RD001-RD009); `--exclude`
+takes globs matched against paths and path components while walking
+directories.
+
 Output is `path:line:col: CODE message`, one per finding; exit code is 1 if
-anything was reported. Silence a function with `# noqa: NU001` (or a bare
-`# noqa`) on its `def` line. `@overload` stubs, the implementation that follows them, and empty bodies
+anything was reported. Silence a finding with `# noqa: RD001` (or a bare
+`# noqa`) on the line it's reported at: the `def`/`class` line for
+function- and class-level rules, the `if`/`except` line for RD001-RD004. `@overload` stubs, the implementation that follows them, and empty bodies
 are skipped.
 
 ## Examples
@@ -233,6 +242,115 @@ def succ(x: int) -> int:
 
 Type names are compared as written, so subclass relationships aren't
 understood (`isinstance(p, Base)` against `Sub | Other` is missed).
+
+### RD001 / RD002 / RD003 — guard, then raise what Python raises anyway
+
+A check before an operation whose failing branch is a lone `raise` of the
+exact exception the operation already raises, **and** the operation actually
+happens on the passing branch:
+
+```python
+# before
+if key not in d:  # RD001
+    raise KeyError(key)
+return d[key]
+
+if not hasattr(o, "name"):  # RD002
+    raise AttributeError("name")
+return o.name
+
+if i >= len(xs):  # RD003
+    raise IndexError(i)
+return xs[i]
+
+# after
+return d[key]
+return o.name
+return xs[i]
+```
+
+Raising a *different* type (`ValueError(f"unknown option {key}")`) is a
+translation and isn't flagged. Note RD003's "after" also accepts negative
+indexes; if that matters, the guard is real and deserves a `# noqa`.
+
+### RD004 — catch E, raise E
+
+A `try` with one handler whose whole body re-raises the same exception:
+bare `raise`, `raise e`, or a rebuilt `raise E(k)` / `raise E(str(e))`
+that adds no message. A rebuilt exception with a string or f-string in it is
+adding context and isn't flagged, nor is a bare `raise` that shields a
+later, broader handler.
+
+```python
+# before
+try:
+    return d[k]
+except KeyError as ke:
+    raise ke
+
+# after
+return d[k]
+```
+
+### RD005 — None check on a param that can't be None
+
+`def f(x: str)` whose body tests `x is None` / `x is not None` / `x == None`.
+Either the check is dead or the annotation is missing `| None`. Skipped
+for `Any`/`object`, TypeVars, names that might be a type alias in the same
+file, implicit Optional (`x: str = None`), and params reassigned in the
+body.
+
+### RD006 — isinstance guard that repeats the annotation
+
+`def f(x: int)` that opens with `if not isinstance(x, int): raise` or
+`assert isinstance(x, int)`. The sibling of NU005. Public APIs sometimes
+want this on purpose; `--ignore RD006` or `# noqa: RD006` it there.
+
+### RD007 — Java-style getters and setters
+
+`get_x(self): return self._x` and `set_x(self, v): self._x = v`. Use a
+plain attribute; if you later need logic, a `@property` keeps the same
+spelling for callers.
+
+### RD008 — pass-through property
+
+A `@property` that returns `self._x` **plus** a `@x.setter` that only
+assigns it. A read-only property (no setter) or a setter that validates is
+fine.
+
+### RD009 — staticmethod namespace
+
+A plain class (no bases, no decorators) whose body is nothing but
+`@staticmethod`s. A module already is a namespace.
+
+### RD010 — function wearing a class
+
+A plain class with just an `__init__` that only assigns `self.*` and one
+public method. Make the method a function of the constructor args. This
+one is opinionated: "capture now, act later" objects and base classes meant
+for subclassing match the shape, so expect to `# noqa` a few.
+
+```python
+# before
+class Greeter:
+    def __init__(self, name):
+        self.name = name
+
+    def greet(self):
+        return f"hi {self.name}"
+
+
+# after
+def greet(name):
+    return f"hi {name}"
+```
+
+### RD011 — override that only forwards to super()
+
+A method whose whole body is `super().<same name>(<same args>)`, passed
+through unchanged. Delete it; the parent's method is already what runs.
+Overrides that change defaults, reorder or add args, or carry decorators
+aren't flagged.
 
 ## What it knows and doesn't
 

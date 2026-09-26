@@ -44,3 +44,46 @@ def test_cli_skips_syntax_errors(tmp_path, capsys):
     f.write_text("def (:\n")
     assert main([str(f)]) == 0
     assert "skipped" in capsys.readouterr().err
+
+
+RD_SRC = """
+def g(d, k):
+    if k not in d:
+        raise KeyError(k)
+    return d[k]
+"""
+
+
+def test_cli_rd_on_by_default(tmp_path, capsys):
+    f = tmp_path / "m.py"
+    f.write_text(textwrap.dedent(SRC + RD_SRC))
+    assert main([str(f)]) == 1
+    out = capsys.readouterr().out
+    assert "NU001" in out and "RD001" in out
+
+
+def test_cli_select_prefix(tmp_path, capsys):
+    f = tmp_path / "m.py"
+    f.write_text(textwrap.dedent(SRC + RD_SRC))
+    main(["--select", "rd", str(f)])
+    out = capsys.readouterr().out
+    assert "RD001" in out and "NU0" not in out
+
+
+def test_cli_ignore(tmp_path, capsys):
+    f = tmp_path / "m.py"
+    f.write_text(textwrap.dedent(SRC + RD_SRC))
+    main(["--ignore", "RD001,NU003", str(f)])
+    out = capsys.readouterr().out
+    assert "NU001" in out and "RD001" not in out and "NU003" not in out
+
+
+def test_cli_exclude(tmp_path, capsys):
+    (tmp_path / "keep.py").write_text(textwrap.dedent(RD_SRC))
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor" / "skip.py").write_text(textwrap.dedent(RD_SRC))
+    (tmp_path / "gen_api.py").write_text(textwrap.dedent(RD_SRC))
+    main(["--exclude", "vendor", "--exclude", "gen_*.py", str(tmp_path)])
+    cap = capsys.readouterr()
+    assert "keep.py" in cap.out and "skip.py" not in cap.out and "gen_api" not in cap.out
+    assert "in 1 file(s)" in cap.err

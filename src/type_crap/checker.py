@@ -17,8 +17,11 @@ from type_crap._ast import (
     _strip_none,
     _terminates,
 )
+from type_crap.redundant import check_redundant
 
-CODES = {"NU001", "NU002", "NU003", "NU004", "NU005"}
+NU_CODES = {"NU001", "NU002", "NU003", "NU004", "NU005"}
+RD_CODES = {f"RD{n:03}" for n in range(1, 12)}
+CODES = NU_CODES | RD_CODES
 
 # Enclosing constructs that don't make a nested guard conditional.
 _STRAIGHT_LINE = {"with", "try"}
@@ -250,7 +253,11 @@ def _child_blocks(st: ast.stmt) -> list[tuple[str, list[ast.stmt]]]:
 
 
 def _noqa(src_lines: list[str], fn: ast.AST) -> set[str]:
-    line = src_lines[fn.lineno - 1]
+    return _noqa_line(src_lines, fn.lineno)
+
+
+def _noqa_line(src_lines: list[str], lineno: int) -> set[str]:
+    line = src_lines[lineno - 1]
     if "# noqa" not in line:
         return set()
     tail = line.split("# noqa", 1)[1].lstrip(":").strip()
@@ -376,6 +383,55 @@ def _type_guards(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, _TypeG
     return out
 
 
+def _typevars(tree: ast.AST) -> set[str]:
+    return {
+        t.id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and isinstance(n.value, ast.Call)
+        and ast.unparse(n.value.func).split(".")[-1] == "TypeVar"
+        for t in n.targets
+        if isinstance(t, ast.Name)
+    }
+
+
+def _aliases(tree: ast.AST) -> set[str]:
+    """Names bound at any level to something that could be a type alias
+    (`X = A | None`, `X: TypeAlias = ...`, `type X = ...`): we can't see
+    through them, so a None test on an `X` param may be legit."""
+    out: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.TypeAlias) and isinstance(n.name, ast.Name):
+            out.add(n.name.id)
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            out.add(n.target.id)
+        elif isinstance(n, ast.Assign):
+            out |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+    return out
+
+
+def _first_none_test(fn: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> int | None:
+    """Line of the first `name is None` / `is not None` / `== None` in fn's own body."""
+    todo: list[ast.AST] = list(fn.body)
+    hits: list[int] = []
+    while todo:
+        n = todo.pop()
+        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+            continue
+        if (
+            isinstance(n, ast.Compare)
+            and len(n.ops) == 1
+            and isinstance(n.ops[0], ast.Is | ast.IsNot | ast.Eq | ast.NotEq)
+        ):
+            sides = [n.left, n.comparators[0]]
+            if any(isinstance(x, ast.Name) and x.id == name for x in sides) and any(
+                _is_none_ann(x) for x in sides
+            ):
+                hits.append(n.lineno)
+        todo.extend(ast.iter_child_nodes(n))
+    return min(hits) if hits else None
+
+
 def _lines(nums: list[int]) -> str:
     return ", ".join(map(str, nums))
 
@@ -385,6 +441,11 @@ def check_source(path: Path, src: str, *, loose: bool = False) -> list[Finding]:
     lines = src.splitlines()
     out: list[Finding] = []
     impls = _overload_impls(tree)
+    typevars = _typevars(tree)
+    aliases = _aliases(tree)
+    for line, col, code, msg in check_redundant(tree):
+        if code not in _noqa_line(lines, line):
+            out.append(Finding(path, line, col, code, msg))
 
     for fn in ast.walk(tree):
         if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -414,6 +475,43 @@ def check_source(path: Path, src: str, *, loose: bool = False) -> list[Finding]:
             )
             if "NU005" not in silenced:
                 out.append(Finding(path, fn.lineno, fn.col_offset, "NU005", msg))
+
+        def report_rd(code: str, msg: str, fn=fn, silenced=silenced) -> None:
+            if code not in silenced:
+                out.append(Finding(path, fn.lineno, fn.col_offset, code, f"`{fn.name}` {msg}"))
+
+        # RD005 -- None check on a param whose annotation excludes None
+        tvs = typevars | {t.name for t in getattr(fn, "type_params", [])}
+        defaults = dict(
+            zip([p.arg for p in [*a.posonlyargs, *a.args]][::-1], a.defaults[::-1], strict=False)
+        )
+        defaults |= {k.arg: d for k, d in zip(a.kwonlyargs, a.kw_defaults, strict=True) if d}
+        reassigned = {
+            n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+        }
+        for name in sorted(nonnone_params - reassigned):
+            ann = ann_of[name]
+            if ast.unparse(ann).strip("'\"") in {"Any", "object", "typing.Any", *tvs, *aliases}:
+                continue
+            if _is_none_ann(defaults.get(name)):
+                continue  # `x: str = None`: implicit Optional, NU rules' business
+            line = _first_none_test(fn, name)
+            if line is not None:
+                report_rd(
+                    "RD005",
+                    f"tests `{name} is None` at line {line} but `{name}: {ast.unparse(ann)}`"
+                    " can't be None; drop the check or annotate `| None`",
+                )
+
+        # RD006 -- isinstance guard that repeats a non-union annotation
+        for name, g in sorted(_type_guards(fn).items()):
+            members = _union_members(ann_of.get(name))
+            if len(members) == 1 and members[0] != "None" and any(members[0] in k for k in g.kept):
+                report_rd(
+                    "RD006",
+                    f"re-checks `isinstance({name}, {members[0]})` at line {g.line} but the"
+                    " annotation already says so; drop the check",
+                )
 
         if not none_params and not ret_none:
             continue

@@ -1,4 +1,4 @@
-"""type-crap: flag `X | None` signatures that don't mean what they say."""
+"""type-crap: flag annotations that lie and code Python makes redundant."""
 
 from type_crap.checker import CODES, Finding, check_source
 
