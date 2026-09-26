@@ -41,6 +41,10 @@ def test_rd005_anywhere_in_body(codes):
         "def f(x):\n    if x is None:\n        pass\n",  # unannotated
         "if TYPE_CHECKING:\n    V = int | None\ndef f(x: V):\n    if x is None:\n        pass\n",
         "type V = int | None\ndef f(x: V):\n    if x is None:\n        pass\n",
+        # an imported name may be an alias holding None
+        "from m import Cell\ndef f(x: Cell):\n    if x is None:\n        pass\n",
+        "import m\ndef f(x: m.Tree):\n    if x is None:\n        pass\n",
+        "from m import Leaf\ndef f(x: list[Leaf] | Leaf):\n    if x is None:\n        pass\n",
     ],
 )
 def test_rd005_fine(codes, src):

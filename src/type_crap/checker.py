@@ -396,6 +396,23 @@ def _aliases(tree: ast.AST) -> set[str]:
     return out
 
 
+def _imported(tree: ast.AST) -> set[str]:
+    """Names an import binds: an imported annotation may be an alias we can't see into."""
+    out: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import | ast.ImportFrom):
+            out |= {(a.asname or a.name).split(".")[0] for a in n.names}
+    return out
+
+
+def _opaque(ann: ast.expr, names: set[str]) -> bool:
+    """True when the annotation names an imported or dotted type we can't expand."""
+    return any(
+        isinstance(n, ast.Attribute) or (isinstance(n, ast.Name) and n.id in names)
+        for n in ast.walk(ann)
+    )
+
+
 def _first_none_test(fn: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> int | None:
     """Line of the first `name is None` / `is not None` / `== None` in fn's own body."""
     todo: list[ast.AST] = list(fn.body)
@@ -429,6 +446,7 @@ def check_source(path: Path, src: str, *, loose: bool = False) -> list[Finding]:
     impls = _overload_impls(tree)
     typevars = _typevars(tree)
     aliases = _aliases(tree)
+    imported = _imported(tree)
     for line, col, code, msg in check_redundant(tree):
         if code not in _noqa_line(lines, line):
             out.append(Finding(path, line, col, code, msg))
@@ -479,6 +497,8 @@ def check_source(path: Path, src: str, *, loose: bool = False) -> list[Finding]:
             ann = ann_of[name]
             if ast.unparse(ann).strip("'\"") in {"Any", "object", "typing.Any", *tvs, *aliases}:
                 continue
+            if _opaque(ann, imported):
+                continue  # `x: Tree` from elsewhere may be an alias that holds None
             if _is_none_ann(defaults.get(name)):
                 continue  # `x: str = None`: implicit Optional, NU rules' business
             line = _first_none_test(fn, name)

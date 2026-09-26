@@ -158,6 +158,11 @@ def test_rd010_one_method_class(check):
         # decorated class
         "@dataclass\nclass G:\n    def __init__(self, n):\n        self.n = n\n"
         "    def greet(self):\n        pass\n",
+        # the method keeps state across calls
+        "class G:\n    def __init__(self):\n        self.n = 0\n"
+        "    def fresh(self):\n        self.n += 1\n        return self.n\n",
+        "class G:\n    def __init__(self):\n        self.cache = {}\n"
+        "    def ok(self, k):\n        self.cache[k] = True\n        return True\n",
         # two methods
         "class G:\n    def __init__(self, n):\n        self.n = n\n"
         "    def a(self):\n        pass\n    def b(self):\n        pass\n",

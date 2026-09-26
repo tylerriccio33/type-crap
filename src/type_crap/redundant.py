@@ -202,6 +202,24 @@ def _self_attr(e: ast.expr, self_name: str) -> str | None:
     return None
 
 
+def _writes_self(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """True when the method stores into `self` (a counter, a cache): state a function can't keep."""
+    self_name = _params(fn)[0] if _params(fn) else ""
+    for n in ast.walk(fn):
+        targets = (
+            n.targets
+            if isinstance(n, ast.Assign)
+            else [n.target]
+            if isinstance(n, ast.AugAssign | ast.AnnAssign)
+            else []
+        )
+        for t in targets:
+            base = t.value if isinstance(t, ast.Subscript) else t
+            if _self_attr(base, self_name) is not None:
+                return True
+    return False
+
+
 def _params(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
     return [p.arg for p in (*fn.args.posonlyargs, *fn.args.args)]
 
@@ -314,7 +332,12 @@ def _class_smells(cls: ast.ClassDef) -> Iterator[Hit]:
             )
             for s in init_body
         )
-        if only_assigns and not other.decorator_list and not other.name.startswith("__"):
+        if (
+            only_assigns
+            and not other.decorator_list
+            and not other.name.startswith("__")
+            and not _writes_self(other)
+        ):
             yield (
                 cls.lineno,
                 cls.col_offset,
